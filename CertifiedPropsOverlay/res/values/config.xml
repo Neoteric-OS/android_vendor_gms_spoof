@@ -8,13 +8,13 @@
     <string-array name="config_certifiedBuildProperties" translatable="false">
         <item>MANUFACTURER:Google</item>
         <item>MODEL:Pixel 9a</item>
-        <item>FINGERPRINT:google/tegu_beta/tegu:16/BP41.250916.015.A1/14394230:user/release-keys</item>
+        <item>FINGERPRINT:google/tegu_beta/tegu:16/CP11.251114.006/14560987:user/release-keys</item>
         <item>BRAND:google</item>
         <item>PRODUCT:tegu_beta</item>
         <item>DEVICE:tegu</item>
         <item>VERSION.RELEASE:16</item>
-        <item>ID:BP41.250916.015.A1</item>
-        <item>VERSION.INCREMENTAL:14394230</item>
+        <item>ID:CP11.251114.006</item>
+        <item>VERSION.INCREMENTAL:14560987</item>
         <item>TAGS:release-keys</item>
         <item>VERSION.DEVICE_INITIAL_SDK_INT:32</item>
     </string-array>
