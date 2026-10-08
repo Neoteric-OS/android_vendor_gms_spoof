@@ -7,11 +7,11 @@
     <!-- Build properties from a GMS certified device -->
     <string-array name="config_certifiedBuildProperties" translatable="false">
         <item>MANUFACTURER:Google</item>
-        <item>MODEL:Pixel 9a</item>
-        <item>FINGERPRINT:google/tegu_beta/tegu:CANARY/ZP11.260918.007/16484274:user/release-keys</item>
+        <item>MODEL:Pixel Tablet</item>
+        <item>FINGERPRINT:google/tangorpro_beta/tangorpro:CANARY/ZP11.260918.007/16484274:user/release-keys</item>
         <item>BRAND:google</item>
-        <item>PRODUCT:tegu_beta</item>
-        <item>DEVICE:tegu</item>
+        <item>PRODUCT:tangorpro_beta</item>
+        <item>DEVICE:tangorpro</item>
         <item>VERSION.RELEASE:16</item>
         <item>ID:ZP11.260918.007</item>
         <item>VERSION.INCREMENTAL:16484274</item>
