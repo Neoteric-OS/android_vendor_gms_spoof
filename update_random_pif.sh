@@ -99,8 +99,27 @@ existing_meta["TAGS"] = "release-keys"
 
 with open(out_file, "w") as f:
     json.dump(existing_meta, f, indent=4)
+
+xml_file = "CertifiedPropsOverlay/res/values/config.xml"
+os.makedirs(os.path.dirname(xml_file), exist_ok=True)
+items_xml = "\n".join([f"        <item>{k}:{v}</item>" for k, v in existing_meta.items()])
+xml_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<!--
+     Copyright (C) 2023 Paranoid Android
+     SPDX-License-Identifier: Apache-2.0
+-->
+<resources>
+    <!-- Build properties from a GMS certified device -->
+    <string-array name="config_certifiedBuildProperties" translatable="false">
+{items_xml}
+    </string-array>
+</resources>
+"""
+
+with open(xml_file, "w") as f:
+    f.write(xml_content)
     
-print(f"\nSuccessfully generated random PIF and updated file:\n{os.path.abspath(out_file)}")
+print(f"\nSuccessfully generated random PIF and updated files:\n- {os.path.abspath(out_file)}\n- {os.path.abspath(xml_file)}")
 print("\nNew injected mock configurations:")
 print(json.dumps(existing_meta, indent=4))
 EOF
