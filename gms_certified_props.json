@@ -1,14 +1,14 @@
 {
     "MANUFACTURER": "Google",
-    "MODEL": "Pixel Fold",
-    "FINGERPRINT": "google/felix_beta/felix:CANARY/ZP11.260918.007/16484274:user/release-keys",
+    "MODEL": "Pixel 6",
+    "FINGERPRINT": "google/oriole_beta/oriole:CANARY/CP31.260623.012/16064790:user/release-keys",
     "BRAND": "google",
-    "PRODUCT": "felix_beta",
-    "DEVICE": "felix",
+    "PRODUCT": "oriole_beta",
+    "DEVICE": "oriole",
     "VERSION.RELEASE": "16",
-    "ID": "ZP11.260918.007",
-    "VERSION.INCREMENTAL": "16484274",
+    "ID": "CP31.260623.012",
+    "VERSION.INCREMENTAL": "16064790",
     "TYPE": "user",
     "TAGS": "release-keys",
-    "VERSION.DEVICE_INITIAL_SDK_INT": "32"
+    "VERSION.DEVICE_INITIAL_SDK_INT": "31"
 }

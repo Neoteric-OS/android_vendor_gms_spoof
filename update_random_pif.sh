@@ -33,8 +33,12 @@ except Exception as e:
 
 print("Fetching latest Android versions...")
 versions_html = get_html("https://developer.android.com/about/versions")
-links = re.findall(r'https://developer\.android\.com/about/versions/[0-9]+', versions_html)
-latest_build_url = sorted(links)[-1]
+nums = [int(n) for n in re.findall(r'https://developer\.android\.com/about/versions/([0-9]+)', versions_html)]
+if not nums:
+    print("Could not find any Android version links.")
+    sys.exit(1)
+latest_version = str(max(nums))  # numeric max, also used as VERSION.RELEASE
+latest_build_url = f"https://developer.android.com/about/versions/{latest_version}"
 
 print("Fetching latest factory image info...")
 latest_html = get_html(latest_build_url)
@@ -42,22 +46,59 @@ factory_url_match = re.search(r'href="(.*download.*)"', latest_html)
 if not factory_url_match:
     print("Could not find factory image download link.")
     sys.exit(1)
-    
+
 factory_html = get_html("https://developer.android.com" + factory_url_match.group(1))
+
+# Pixel 8 series and older, mapped to the SDK level each device LAUNCHED with
+# (value for VERSION.DEVICE_INITIAL_SDK_INT / ro.product.first_api_level).
+# Newer devices (Pixel 9+, 9a, 10, ...) are excluded.
+ALLOWED_CODENAMES = {
+    # Pixel 8 series (Android 14 -> API 34)
+    "shiba": 34,      # Pixel 8
+    "husky": 34,      # Pixel 8 Pro
+    "akita": 34,      # Pixel 8a
+    # Pixel 7 series + 2023 foldable/tablet (Android 13 -> API 33)
+    "panther": 33,    # Pixel 7
+    "cheetah": 33,    # Pixel 7 Pro
+    "lynx": 33,       # Pixel 7a
+    "felix": 33,      # Pixel Fold
+    "tangorpro": 33,  # Pixel Tablet
+    # Pixel 6 series (Android 12 -> API 31)
+    "oriole": 31,     # Pixel 6
+    "raven": 31,      # Pixel 6 Pro
+    "bluejay": 31,    # Pixel 6a
+    # Pixel 5 / 4a 5G / 5a (Android 11 -> API 30)
+    "redfin": 30,     # Pixel 5
+    "bramble": 30,    # Pixel 4a (5G)
+    "barbet": 30,     # Pixel 5a
+    # Pixel 4 series (Android 10 -> API 29)
+    "sunfish": 29,    # Pixel 4a
+    "coral": 29,      # Pixel 4 XL
+    "flame": 29,      # Pixel 4
+    # Pixel 3 series (Android 9 -> API 28)
+    "bonito": 28,     # Pixel 3a XL
+    "sargo": 28,      # Pixel 3a
+    "crosshatch": 28, # Pixel 3 XL
+    "blueline": 28,   # Pixel 3
+}
 
 devices = {}
 for m in re.finditer(r'<tr\s+id="([^"]+)"[^>]*>\s*<td>([^<]+)</td>', factory_html, re.I):
-    devices[m.group(2).strip()] = m.group(1).strip() + "_beta"
+    codename = m.group(1).strip()
+    if codename not in ALLOWED_CODENAMES:
+        continue
+    devices[m.group(2).strip()] = codename + "_beta"
 
 if not devices:
-    print("No beta devices found.")
+    print("No beta devices at or below the Pixel 8 series found in the latest factory images.")
     sys.exit(1)
 
 device_name = random.choice(list(devices.keys()))
 product = devices[device_name]
 device = product.replace("_beta", "")
+initial_sdk = ALLOWED_CODENAMES[device]
 
-print(f"Selected random device: {device_name} ({device})")
+print(f"Selected random device: {device_name} ({device}), initial SDK {initial_sdk}")
 
 print("Getting flash station key...")
 flash_html = get_html("https://flash.android.com/")
@@ -65,7 +106,7 @@ flash_key_match = re.search(r'data-client-config\s*=\s*"(?:[^,]*?,){2}\s*&quot;(
 if not flash_key_match:
     print("Failed to get flash key.")
     sys.exit(1)
-    
+
 flash_key = flash_key_match.group(1).replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
 
 print("Fetching build information...")
@@ -82,8 +123,12 @@ for rc, bi in zip(re.finditer(r'"releaseCandidateName"\s*:\s*"([^"]+)"', station
     build_id = rc.group(1)
     build_inc = bi.group(1)
 
-release_version = existing_meta.get("VERSION.RELEASE", "CANARY")
+if not build_id or not build_inc:
+    print("Could not parse build id/incremental from flash station response.")
+    sys.exit(1)
 
+# Fingerprint keeps the literal "CANARY"; ro.build.version.release is numeric.
+RELEASE = latest_version
 fingerprint = f"google/{product}/{device}:CANARY/{build_id}/{build_inc}:user/release-keys"
 
 existing_meta["MANUFACTURER"] = "Google"
@@ -94,6 +139,8 @@ existing_meta["PRODUCT"] = product
 existing_meta["DEVICE"] = device
 existing_meta["ID"] = build_id
 existing_meta["VERSION.INCREMENTAL"] = build_inc
+existing_meta["VERSION.RELEASE"] = RELEASE
+existing_meta["VERSION.DEVICE_INITIAL_SDK_INT"] = str(initial_sdk)
 existing_meta["TYPE"] = "user"
 existing_meta["TAGS"] = "release-keys"
 
@@ -118,7 +165,7 @@ xml_content = f"""<?xml version="1.0" encoding="utf-8"?>
 
 with open(xml_file, "w") as f:
     f.write(xml_content)
-    
+
 print(f"\nSuccessfully generated random PIF and updated files:\n- {os.path.abspath(out_file)}\n- {os.path.abspath(xml_file)}")
 print("\nNew injected mock configurations:")
 print(json.dumps(existing_meta, indent=4))
