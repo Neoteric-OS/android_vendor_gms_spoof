@@ -24,6 +24,9 @@ def get_html(url):
 
 out_file = "gms_certified_props.json"
 
+# Hardcoded security patch level
+SECURITY_PATCH = "2026-10-05"
+
 try:
     with open(out_file, "r") as f:
         existing_meta = json.load(f)
@@ -33,21 +36,28 @@ except Exception as e:
 
 print("Fetching latest Android versions...")
 versions_html = get_html("https://developer.android.com/about/versions")
-nums = [int(n) for n in re.findall(r'https://developer\.android\.com/about/versions/([0-9]+)', versions_html)]
+# Only whole-number version links (e.g. /about/versions/17), deduplicated.
+nums = sorted({int(n) for n in re.findall(r'/about/versions/([0-9]+)(?=["/#?\']|$)', versions_html)})
 if not nums:
     print("Could not find any Android version links.")
     sys.exit(1)
-latest_version = str(max(nums))  # numeric max, also used as VERSION.RELEASE
+latest_version = str(nums[-1])  # numeric max, used as VERSION.RELEASE (canary tracks the next major)
 latest_build_url = f"https://developer.android.com/about/versions/{latest_version}"
+print(f"Latest Android version: {latest_version}")
 
 print("Fetching latest factory image info...")
 latest_html = get_html(latest_build_url)
-factory_url_match = re.search(r'href="(.*download.*)"', latest_html)
+factory_url_match = re.search(r'href="([^"]*download[^"]*)"', latest_html)
 if not factory_url_match:
     print("Could not find factory image download link.")
     sys.exit(1)
 
-factory_html = get_html("https://developer.android.com" + factory_url_match.group(1))
+factory_link = factory_url_match.group(1)
+if factory_link.startswith("http"):
+    factory_url = factory_link
+else:
+    factory_url = "https://developer.android.com" + factory_link
+factory_html = get_html(factory_url)
 
 # Pixel 8 series and older, mapped to the SDK level each device LAUNCHED with
 # (value for VERSION.DEVICE_INITIAL_SDK_INT / ro.product.first_api_level).
@@ -118,10 +128,34 @@ station_json = urllib.request.urlopen(station_req, timeout=10).read().decode('ut
 
 build_id = None
 build_inc = None
-for rc, bi in zip(re.finditer(r'"releaseCandidateName"\s*:\s*"([^"]+)"', station_json),
-                  re.finditer(r'"buildId"\s*:\s*"([^"]+)"', station_json)):
-    build_id = rc.group(1)
-    build_inc = bi.group(1)
+
+# Prefer structured parsing so name/id pairs stay aligned and we take the newest
+# CANARY entry; fall back to the regex pairing if the shape is unexpected.
+def collect_builds(node, acc):
+    if isinstance(node, dict):
+        if "releaseCandidateName" in node and "buildId" in node:
+            acc.append((str(node["releaseCandidateName"]), str(node["buildId"]), node))
+        for v in node.values():
+            collect_builds(v, acc)
+    elif isinstance(node, list):
+        for v in node:
+            collect_builds(v, acc)
+
+try:
+    builds = []
+    collect_builds(json.loads(station_json), builds)
+    canary = [b for b in builds if "canary" in json.dumps(b[2]).lower()]
+    pick = (canary or builds)[-1] if (canary or builds) else None
+    if pick:
+        build_id, build_inc = pick[0], pick[1]
+except ValueError:
+    pass
+
+if not build_id or not build_inc:
+    for rc, bi in zip(re.finditer(r'"releaseCandidateName"\s*:\s*"([^"]+)"', station_json),
+                      re.finditer(r'"buildId"\s*:\s*"([^"]+)"', station_json)):
+        build_id = rc.group(1)
+        build_inc = bi.group(1)
 
 if not build_id or not build_inc:
     print("Could not parse build id/incremental from flash station response.")
@@ -140,6 +174,7 @@ existing_meta["DEVICE"] = device
 existing_meta["ID"] = build_id
 existing_meta["VERSION.INCREMENTAL"] = build_inc
 existing_meta["VERSION.RELEASE"] = RELEASE
+existing_meta["VERSION.SECURITY_PATCH"] = SECURITY_PATCH
 existing_meta["VERSION.DEVICE_INITIAL_SDK_INT"] = str(initial_sdk)
 existing_meta["TYPE"] = "user"
 existing_meta["TAGS"] = "release-keys"

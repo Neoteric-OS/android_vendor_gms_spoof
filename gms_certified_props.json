@@ -1,14 +1,15 @@
 {
     "MANUFACTURER": "Google",
-    "MODEL": "Pixel 6 Pro",
-    "FINGERPRINT": "google/raven_beta/raven:CANARY/CP31.260623.012/16064790:user/release-keys",
+    "MODEL": "Pixel 7 Pro",
+    "FINGERPRINT": "google/cheetah_beta/cheetah:CANARY/ZP11.260918.007/16484274:user/release-keys",
     "BRAND": "google",
-    "PRODUCT": "raven_beta",
-    "DEVICE": "raven",
-    "VERSION.RELEASE": "16",
-    "ID": "CP31.260623.012",
-    "VERSION.INCREMENTAL": "16064790",
+    "PRODUCT": "cheetah_beta",
+    "DEVICE": "cheetah",
+    "ID": "ZP11.260918.007",
+    "VERSION.INCREMENTAL": "16484274",
+    "VERSION.RELEASE": "17",
+    "VERSION.SECURITY_PATCH": "2026-10-05",
+    "VERSION.DEVICE_INITIAL_SDK_INT": "33",
     "TYPE": "user",
-    "TAGS": "release-keys",
-    "VERSION.DEVICE_INITIAL_SDK_INT": "31"
+    "TAGS": "release-keys"
 }
