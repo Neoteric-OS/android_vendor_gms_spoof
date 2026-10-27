@@ -59,56 +59,119 @@ else:
     factory_url = "https://developer.android.com" + factory_link
 factory_html = get_html(factory_url)
 
-# Pixel 8 series and older, mapped to the SDK level each device LAUNCHED with
-# (value for VERSION.DEVICE_INITIAL_SDK_INT / ro.product.first_api_level).
-# Newer devices (Pixel 9+, 9a, 10, ...) are excluded.
-ALLOWED_CODENAMES = {
-    # Pixel 8 series (Android 14 -> API 34)
-    "shiba": 34,      # Pixel 8
-    "husky": 34,      # Pixel 8 Pro
-    "akita": 34,      # Pixel 8a
-    # Pixel 7 series + 2023 foldable/tablet (Android 13 -> API 33)
-    "panther": 33,    # Pixel 7
-    "cheetah": 33,    # Pixel 7 Pro
-    "lynx": 33,       # Pixel 7a
-    "felix": 33,      # Pixel Fold
-    "tangorpro": 33,  # Pixel Tablet
-    # Pixel 6 series (Android 12 -> API 31)
-    "oriole": 31,     # Pixel 6
-    "raven": 31,      # Pixel 6 Pro
-    "bluejay": 31,    # Pixel 6a
-    # Pixel 5 / 4a 5G / 5a (Android 11 -> API 30)
-    "redfin": 30,     # Pixel 5
-    "bramble": 30,    # Pixel 4a (5G)
-    "barbet": 30,     # Pixel 5a
-    # Pixel 4 series (Android 10 -> API 29)
-    "sunfish": 29,    # Pixel 4a
-    "coral": 29,      # Pixel 4 XL
-    "flame": 29,      # Pixel 4
-    # Pixel 3 series (Android 9 -> API 28)
-    "bonito": 28,     # Pixel 3a XL
-    "sargo": 28,      # Pixel 3a
-    "crosshatch": 28, # Pixel 3 XL
-    "blueline": 28,   # Pixel 3
-}
+def find_initial_sdk(device_name, codename, flash_key, fallback_sdk=None):
+    candidates = []
+
+    # 1. Check official AOSP tags from source.android.com build-numbers
+    try:
+        req = urllib.request.Request(
+            "https://source.android.com/docs/setup/reference/build-numbers",
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        html = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
+
+        version_to_api = {
+            "pie": 28, "oreo": 26, "nougat": 24, "marshmallow": 23,
+            "android10": 29, "android11": 30, "android12": 31, "android12l": 32,
+            "android13": 33, "android14": 34, "android15": 35, "android16": 36, "android17": 37
+        }
+        for m in re.finditer(r'<tr>\s*<td>([^<]+)</td>\s*<td>([^<]+)</td>\s*<td>API level ([0-9]+)', html, re.I):
+            vname = m.group(1).strip().lower().replace(' ', '')
+            api = int(m.group(3))
+            version_to_api[vname] = api
+
+        pos = html.find('id="source-code-tags-and-builds"')
+        if pos != -1:
+            end_pos = html.find('</table>', pos)
+            table_html = html[pos:end_pos] if end_pos != -1 else html[pos:]
+            target_norm = re.sub(r'\s+', ' ', device_name.lower().replace('google', '')).strip()
+
+            device_min_api = {}
+            for row in re.findall(r'<tr>(.*?)</tr>', table_html, re.DOTALL):
+                cols = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+                if len(cols) >= 4:
+                    v_str = re.sub(r'<[^>]+>', '', cols[2]).strip().lower().replace(' ', '')
+                    d_str = re.sub(r'<[^>]+>', '', cols[3]).strip()
+                    api = version_to_api.get(v_str)
+                    if not api:
+                        digits = re.findall(r'\d+', v_str)
+                        if digits and digits[0] in version_to_api:
+                            api = version_to_api[digits[0]]
+                    if not api:
+                        continue
+                    for dev in d_str.split(','):
+                        dev_norm = re.sub(r'\s+', ' ', dev.lower().replace('google', '')).strip()
+                        if not dev_norm:
+                            continue
+                        if dev_norm not in device_min_api or api < device_min_api[dev_norm]:
+                            device_min_api[dev_norm] = api
+
+            if target_norm in device_min_api:
+                candidates.append(device_min_api[target_norm])
+    except Exception as e:
+        print(f"Warning: Failed to fetch/parse source.android.com: {e}", file=sys.stderr)
+
+    # 2. Check Android Flash Station production builds API level
+    if flash_key:
+        try:
+            station_req = urllib.request.Request(
+                f"https://content-flashstation-pa.googleapis.com/v1/builds?product={codename}&key={flash_key}",
+                headers={'Referer': 'https://flash.android.com/'}
+            )
+            data = json.loads(urllib.request.urlopen(station_req, timeout=5).read().decode('utf-8'))
+            builds = data.get("flashstationBuild", [])
+            apis = [b.get("apiLevel") for b in builds if isinstance(b.get("apiLevel"), int)]
+            if apis:
+                candidates.append(min(apis))
+        except Exception as e:
+            print(f"Warning: Failed to fetch flash station builds for {codename}: {e}", file=sys.stderr)
+
+    if candidates:
+        return min(candidates)
+
+    # 3. Heuristic fallback based on device naming convention
+    dlower = device_name.lower()
+    if "tablet" in dlower:
+        return 33
+    if "fold" in dlower and not any(k in dlower for k in ["9", "10", "11", "12"]):
+        return 33
+    m = re.search(r'pixel\s*(\d+)', dlower)
+    if m:
+        gen = int(m.group(1))
+        is_a = bool(re.search(r'pixel\s*\d+a', dlower))
+        if gen == 1: return 25
+        if gen == 2: return 26
+        if gen == 3: return 28
+        if gen == 4: return 29
+        if gen == 5: return 30
+        if gen == 6: return 31
+        if gen == 7: return 33
+        if gen == 8: return 34
+        if gen == 9: return 35 if is_a else 34
+        if gen >= 10: return gen + 26
+
+    # 4. Final safety net
+    if fallback_sdk:
+        try:
+            return int(fallback_sdk)
+        except (ValueError, TypeError):
+            pass
+
+    return 33
 
 devices = {}
 for m in re.finditer(r'<tr\s+id="([^"]+)"[^>]*>\s*<td>([^<]+)</td>', factory_html, re.I):
     codename = m.group(1).strip()
-    if codename not in ALLOWED_CODENAMES:
-        continue
-    devices[m.group(2).strip()] = codename + "_beta"
+    name = m.group(2).strip()
+    devices[name] = codename + "_beta"
 
 if not devices:
-    print("No beta devices at or below the Pixel 8 series found in the latest factory images.")
+    print("Could not find any devices in the latest factory images.")
     sys.exit(1)
 
 device_name = random.choice(list(devices.keys()))
 product = devices[device_name]
 device = product.replace("_beta", "")
-initial_sdk = ALLOWED_CODENAMES[device]
-
-print(f"Selected random device: {device_name} ({device}), initial SDK {initial_sdk}")
 
 print("Getting flash station key...")
 flash_html = get_html("https://flash.android.com/")
@@ -118,6 +181,11 @@ if not flash_key_match:
     sys.exit(1)
 
 flash_key = flash_key_match.group(1).replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+
+print(f"Determining initial SDK for {device_name} ({device})...")
+initial_sdk = find_initial_sdk(device_name, device, flash_key, existing_meta.get("VERSION.DEVICE_INITIAL_SDK_INT"))
+
+print(f"Selected random device: {device_name} ({device}), initial SDK {initial_sdk}")
 
 print("Fetching build information...")
 station_req = urllib.request.Request(
