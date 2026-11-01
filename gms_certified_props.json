@@ -1,15 +1,15 @@
 {
     "MANUFACTURER": "Google",
-    "MODEL": "Pixel 10 Pro Fold",
-    "FINGERPRINT": "google/rango_beta/rango:CANARY/ZP11.260918.007/16484274:user/release-keys",
+    "MODEL": "Pixel 6a",
+    "FINGERPRINT": "google/bluejay_beta/bluejay:CANARY/ZP11.260918.007/16484274:user/release-keys",
     "BRAND": "google",
-    "PRODUCT": "rango_beta",
-    "DEVICE": "rango",
+    "PRODUCT": "bluejay_beta",
+    "DEVICE": "bluejay",
     "ID": "ZP11.260918.007",
     "VERSION.INCREMENTAL": "16484274",
     "VERSION.RELEASE": "17",
     "VERSION.SECURITY_PATCH": "2026-10-05",
-    "VERSION.DEVICE_INITIAL_SDK_INT": "36",
+    "VERSION.DEVICE_INITIAL_SDK_INT": "31",
     "TYPE": "user",
     "TAGS": "release-keys"
 }
