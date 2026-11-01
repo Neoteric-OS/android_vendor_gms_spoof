@@ -14,10 +14,13 @@ import random
 import sys
 import os
 
-def get_html(url):
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+def get_html(url, timeout=15, extra_headers=None):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
     try:
-        return urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+        return urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8')
     except Exception as e:
         print(f"Error fetching {url}: {e}", file=sys.stderr)
         sys.exit(1)
@@ -26,6 +29,9 @@ out_file = "gms_certified_props.json"
 
 # Hardcoded security patch level
 SECURITY_PATCH = "2026-10-05"
+
+# Minimum required DEVICE_INITIAL_SDK_INT (API 32 = Android 12L)
+MIN_INITIAL_SDK = 32
 
 try:
     with open(out_file, "r") as f:
@@ -59,98 +65,145 @@ else:
     factory_url = "https://developer.android.com" + factory_link
 factory_html = get_html(factory_url)
 
-def find_initial_sdk(device_name, codename, flash_key, fallback_sdk=None):
-    candidates = []
+def version_str_to_api(v_str, api_map):
+    """Dynamically map an Android version string (e.g. '12.1.0', 'Android12L', '14.0.0') to an API level."""
+    s = v_str.strip().lower().replace(" ", "")
+    if s in api_map:
+        return api_map[s]
 
-    # 1. Check official AOSP tags from source.android.com build-numbers
+    # Normalize 'android-12.1.0_r12' or '12.1.0 (SD2A...)' -> '12.1' or '12l'
+    if "12l" in s or re.search(r'(?:^|\D)12\.1(?:\D|$)', s):
+        return api_map.get("12l", 32)
+
+    m = re.search(r'(\d+)\.(\d+)', s)
+    if m:
+        major, minor = int(m.group(1)), int(m.group(2))
+        if f"{major}.{minor}" in api_map:
+            return api_map[f"{major}.{minor}"]
+        if str(major) in api_map and minor == 0:
+            return api_map[str(major)]
+        # Algorithmic mapping for Android 13+ (API = Major + 20) and 10-12 (API = Major + 19)
+        if major >= 13:
+            return major + 20
+        if 10 <= major <= 12:
+            return 32 if (major == 12 and minor >= 1) else major + 19
+
+    m_maj = re.search(r'(\d+)', s)
+    if m_maj:
+        major = int(m_maj.group(1))
+        if str(major) in api_map:
+            return api_map[str(major)]
+        if major >= 13:
+            return major + 20
+        if 10 <= major <= 12:
+            return major + 19
+
+    return None
+
+# Cache reference pages once so checking multiple candidate devices is fast
+_ref_cache = {"loaded": False, "api_map": {}, "table_html": "", "img_html": ""}
+
+def load_reference_pages():
+    if _ref_cache["loaded"]:
+        return
+    _ref_cache["loaded"] = True
+    api_map = _ref_cache["api_map"]
+
     try:
         req = urllib.request.Request(
             "https://source.android.com/docs/setup/reference/build-numbers",
             headers={'User-Agent': 'Mozilla/5.0'}
         )
-        html = urllib.request.urlopen(req, timeout=5).read().decode('utf-8')
+        html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8')
 
-        version_to_api = {
-            "pie": 28, "oreo": 26, "nougat": 24, "marshmallow": 23,
-            "android10": 29, "android11": 30, "android12": 31, "android12l": 32,
-            "android13": 33, "android14": 34, "android15": 35, "android16": 36, "android17": 37
-        }
-        for m in re.finditer(r'<tr>\s*<td>([^<]+)</td>\s*<td>([^<]+)</td>\s*<td>API level ([0-9]+)', html, re.I):
-            vname = m.group(1).strip().lower().replace(' ', '')
-            api = int(m.group(3))
-            version_to_api[vname] = api
+        for row in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.I):
+            cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)]
+            if len(cols) >= 3:
+                m_api = re.search(r'API\s*level\s*(\d+)', " ".join(cols), re.I)
+                if m_api:
+                    api_val = int(m_api.group(1))
+                    for col_text in cols[:2]:
+                        key = col_text.lower().replace(" ", "")
+                        api_map[key] = api_val
+                        api_map[key.replace("android", "")] = api_val
+                        for ver_tok in re.findall(r'\d+(?:\.\d+)?l?', key):
+                            api_map[ver_tok] = api_val
 
         pos = html.find('id="source-code-tags-and-builds"')
-        if pos != -1:
-            end_pos = html.find('</table>', pos)
-            table_html = html[pos:end_pos] if end_pos != -1 else html[pos:]
-            target_norm = re.sub(r'\s+', ' ', device_name.lower().replace('google', '')).strip()
-
-            device_min_api = {}
-            for row in re.findall(r'<tr>(.*?)</tr>', table_html, re.DOTALL):
-                cols = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
-                if len(cols) >= 4:
-                    v_str = re.sub(r'<[^>]+>', '', cols[2]).strip().lower().replace(' ', '')
-                    d_str = re.sub(r'<[^>]+>', '', cols[3]).strip()
-                    api = version_to_api.get(v_str)
-                    if not api:
-                        digits = re.findall(r'\d+', v_str)
-                        if digits and digits[0] in version_to_api:
-                            api = version_to_api[digits[0]]
-                    if not api:
-                        continue
-                    for dev in d_str.split(','):
-                        dev_norm = re.sub(r'\s+', ' ', dev.lower().replace('google', '')).strip()
-                        if not dev_norm:
-                            continue
-                        if dev_norm not in device_min_api or api < device_min_api[dev_norm]:
-                            device_min_api[dev_norm] = api
-
-            if target_norm in device_min_api:
-                candidates.append(device_min_api[target_norm])
+        table_html = html[pos:] if pos != -1 else html
+        end_pos = table_html.find('</table>')
+        if end_pos != -1:
+            table_html = table_html[:end_pos]
+        _ref_cache["table_html"] = table_html
     except Exception as e:
         print(f"Warning: Failed to fetch/parse source.android.com: {e}", file=sys.stderr)
 
-    # 2. Check Android Flash Station production builds API level
+    try:
+        req = urllib.request.Request(
+            "https://developers.google.com/android/images",
+            headers={'User-Agent': 'Mozilla/5.0', 'Cookie': 'devsite_wall_acks=nexus-image-tos'}
+        )
+        _ref_cache["img_html"] = urllib.request.urlopen(req, timeout=15).read().decode('utf-8')
+    except Exception as e:
+        print(f"Warning: Failed to fetch/parse factory images page: {e}", file=sys.stderr)
+
+def find_initial_sdk(device_name, codename, flash_key, fallback_sdk=None):
+    load_reference_pages()
+    clean_code = codename.lower().replace("_beta", "").strip()
+    target_norm = re.sub(r'\s+', ' ', device_name.lower().replace('google', '')).strip()
+    api_map = _ref_cache["api_map"]
+    table_html = _ref_cache["table_html"]
+    img_html = _ref_cache["img_html"]
+    candidates = []
+
+    # 1. Check Source Code Tags and Builds table
+    if table_html:
+        for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.I):
+            cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)]
+            if len(cols) >= 4:
+                tag_str, ver_str, dev_col = cols[1], cols[2], cols[3]
+                api = version_str_to_api(ver_str, api_map) or version_str_to_api(tag_str, api_map)
+                if not api:
+                    continue
+                for dev in dev_col.split(','):
+                    dev_norm = re.sub(r'\s+', ' ', dev.lower().replace('google', '')).strip()
+                    if dev_norm == target_norm:
+                        candidates.append(api)
+
+    # 2. Check official Factory Images page by exact codename (first entry = launch build)
+    if img_html:
+        pattern = rf'<tr\s+id="{re.escape(clean_code)}[^"]*"[^>]*>\s*<td>([^<]+)</td>'
+        ver_matches = re.findall(pattern, img_html, re.I)
+        if ver_matches:
+            launch_api = version_str_to_api(ver_matches[0], api_map)
+            if launch_api:
+                candidates.append(launch_api)
+
+    # 3. Check Android Flash Station production builds API level
     if flash_key:
         try:
             station_req = urllib.request.Request(
-                f"https://content-flashstation-pa.googleapis.com/v1/builds?product={codename}&key={flash_key}",
+                f"https://content-flashstation-pa.googleapis.com/v1/builds?product={clean_code}&key={flash_key}",
                 headers={'Referer': 'https://flash.android.com/'}
             )
-            data = json.loads(urllib.request.urlopen(station_req, timeout=5).read().decode('utf-8'))
+            data = json.loads(urllib.request.urlopen(station_req, timeout=10).read().decode('utf-8'))
             builds = data.get("flashstationBuild", [])
-            apis = [b.get("apiLevel") for b in builds if isinstance(b.get("apiLevel"), int)]
+            apis = []
+            for b in builds:
+                for k in ("apiLevel", "releaseTrackVersion"):
+                    val = b.get(k)
+                    if isinstance(val, int) and val >= 21:
+                        apis.append(val)
+                    elif isinstance(val, str) and val.isdigit() and int(val) >= 21:
+                        apis.append(int(val))
             if apis:
                 candidates.append(min(apis))
         except Exception as e:
-            print(f"Warning: Failed to fetch flash station builds for {codename}: {e}", file=sys.stderr)
+            print(f"Warning: Failed to fetch flash station builds for {clean_code}: {e}", file=sys.stderr)
 
     if candidates:
         return min(candidates)
 
-    # 3. Heuristic fallback based on device naming convention
-    dlower = device_name.lower()
-    if "tablet" in dlower:
-        return 33
-    if "fold" in dlower and not any(k in dlower for k in ["9", "10", "11", "12"]):
-        return 33
-    m = re.search(r'pixel\s*(\d+)', dlower)
-    if m:
-        gen = int(m.group(1))
-        is_a = bool(re.search(r'pixel\s*\d+a', dlower))
-        if gen == 1: return 25
-        if gen == 2: return 26
-        if gen == 3: return 28
-        if gen == 4: return 29
-        if gen == 5: return 30
-        if gen == 6: return 31
-        if gen == 7: return 33
-        if gen == 8: return 34
-        if gen == 9: return 35 if is_a else 34
-        if gen >= 10: return gen + 26
-
-    # 4. Final safety net
     if fallback_sdk:
         try:
             return int(fallback_sdk)
@@ -169,10 +222,6 @@ if not devices:
     print("Could not find any devices in the latest factory images.")
     sys.exit(1)
 
-device_name = random.choice(list(devices.keys()))
-product = devices[device_name]
-device = product.replace("_beta", "")
-
 print("Getting flash station key...")
 flash_html = get_html("https://flash.android.com/")
 flash_key_match = re.search(r'data-client-config\s*=\s*"(?:[^,]*?,){2}\s*&quot;([^&]+)&quot;', flash_html, re.I)
@@ -182,8 +231,30 @@ if not flash_key_match:
 
 flash_key = flash_key_match.group(1).replace("&quot;", '"').replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
 
-print(f"Determining initial SDK for {device_name} ({device})...")
-initial_sdk = find_initial_sdk(device_name, device, flash_key, existing_meta.get("VERSION.DEVICE_INITIAL_SDK_INT"))
+candidate_names = list(devices.keys())
+random.shuffle(candidate_names)
+
+device_name = None
+product = None
+device = None
+initial_sdk = None
+
+for cand_name in candidate_names:
+    cand_product = devices[cand_name]
+    cand_device = cand_product.replace("_beta", "")
+    print(f"Checking initial SDK for {cand_name} ({cand_device})...")
+    sdk = find_initial_sdk(cand_name, cand_device, flash_key, existing_meta.get("VERSION.DEVICE_INITIAL_SDK_INT"))
+    if sdk >= MIN_INITIAL_SDK:
+        device_name = cand_name
+        product = cand_product
+        device = cand_device
+        initial_sdk = sdk
+        break
+    print(f"Skipping {cand_name} ({cand_device}): initial SDK {sdk} is less than {MIN_INITIAL_SDK}.")
+
+if not device_name:
+    print(f"Could not find any device with DEVICE_INITIAL_SDK_INT >= {MIN_INITIAL_SDK}.")
+    sys.exit(1)
 
 print(f"Selected random device: {device_name} ({device}), initial SDK {initial_sdk}")
 
