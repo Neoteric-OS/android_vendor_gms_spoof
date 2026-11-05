@@ -13,6 +13,7 @@ import json
 import random
 import sys
 import os
+from collections import Counter
 
 def get_html(url, timeout=15, extra_headers=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -66,7 +67,7 @@ else:
 factory_html = get_html(factory_url)
 
 def version_str_to_api(v_str, api_map):
-    """Dynamically map an Android version string (e.g. '12.1.0', 'Android12L', '14.0.0') to an API level."""
+    """Dynamically map an Android version string (e.g. '12.1.0', 'Android12L', '15.0.0') to an API level."""
     s = v_str.strip().lower().replace(" ", "")
     if s in api_map:
         return api_map[s]
@@ -82,7 +83,6 @@ def version_str_to_api(v_str, api_map):
             return api_map[f"{major}.{minor}"]
         if str(major) in api_map and minor == 0:
             return api_map[str(major)]
-        # Algorithmic mapping for Android 13+ (API = Major + 20) and 10-12 (API = Major + 19)
         if major >= 13:
             return major + 20
         if 10 <= major <= 12:
@@ -101,13 +101,20 @@ def version_str_to_api(v_str, api_map):
     return None
 
 # Cache reference pages once so checking multiple candidate devices is fast
-_ref_cache = {"loaded": False, "api_map": {}, "table_html": "", "img_html": ""}
+_ref_cache = {
+    "loaded": False,
+    "api_map": {},
+    "prefix_api_map": {},
+    "table_html": "",
+    "img_html": ""
+}
 
 def load_reference_pages():
     if _ref_cache["loaded"]:
         return
     _ref_cache["loaded"] = True
     api_map = _ref_cache["api_map"]
+    prefix_api_map = _ref_cache["prefix_api_map"]
 
     try:
         req = urllib.request.Request(
@@ -118,11 +125,13 @@ def load_reference_pages():
 
         for row in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.I):
             cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)]
-            if len(cols) >= 3:
+            if len(cols) >= 2:
                 m_api = re.search(r'API\s*level\s*(\d+)', " ".join(cols), re.I)
                 if m_api:
                     api_val = int(m_api.group(1))
                     for col_text in cols[:2]:
+                        if "api" in col_text.lower():
+                            continue
                         key = col_text.lower().replace(" ", "")
                         api_map[key] = api_val
                         api_map[key.replace("android", "")] = api_val
@@ -135,6 +144,18 @@ def load_reference_pages():
         if end_pos != -1:
             table_html = table_html[:end_pos]
         _ref_cache["table_html"] = table_html
+
+        # Learn build ID prefixes from source-code-tags-and-builds
+        for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.I):
+            cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)]
+            if len(cols) >= 3:
+                build_id, tag_str, ver_str = cols[0], cols[1], cols[2]
+                api = version_str_to_api(ver_str, api_map) or version_str_to_api(tag_str, api_map)
+                m_bid = re.match(r'^([A-Z0-9]{3,4})\.\d{6}', build_id, re.I)
+                if api and m_bid:
+                    p = m_bid.group(1).upper()
+                    prefix_api_map[p] = api
+                    prefix_api_map[p[:3]] = api
     except Exception as e:
         print(f"Warning: Failed to fetch/parse source.android.com: {e}", file=sys.stderr)
 
@@ -143,21 +164,97 @@ def load_reference_pages():
             "https://developers.google.com/android/images",
             headers={'User-Agent': 'Mozilla/5.0', 'Cookie': 'devsite_wall_acks=nexus-image-tos'}
         )
-        _ref_cache["img_html"] = urllib.request.urlopen(req, timeout=15).read().decode('utf-8')
+        img_html = urllib.request.urlopen(req, timeout=15).read().decode('utf-8')
+        _ref_cache["img_html"] = img_html
+
+        # Dynamically learn all (Version -> Build Prefix -> API) mappings across all factory images.
+        # Beta builds (e.g. AP41, BP11, BP22) share their 3-char prefix (AP4, BP1, BP2) with stable (AP4A, BP1A, BP2A).
+        for td_text in re.findall(r'<td>\s*([0-9][^<]*?\([A-Z0-9]+\.\d{6}[^<]*?\))\s*</td>', img_html, re.I):
+            m_entry = re.search(r'^([^\(]+)\(\s*([A-Z0-9]{3,4})\.\d{6}', td_text.strip(), re.I)
+            if m_entry:
+                ver_part, bid_prefix = m_entry.group(1).strip(), m_entry.group(2).upper()
+                api = version_str_to_api(ver_part, api_map)
+                if api:
+                    prefix_api_map[bid_prefix] = api
+                    prefix_api_map[bid_prefix[:3]] = api
     except Exception as e:
         print(f"Warning: Failed to fetch/parse factory images page: {e}", file=sys.stderr)
 
-def find_initial_sdk(device_name, codename, flash_key, fallback_sdk=None):
+def build_id_to_api(build_id):
+    """Map a build ID (e.g. 'AP41.240726.009', 'AD1A.240530.030') to an API level dynamically."""
+    prefix_api_map = _ref_cache["prefix_api_map"]
+    m = re.match(r'^([A-Z0-9]{3,4})\.\d{6}', build_id.strip(), re.I)
+    if not m:
+        return None
+    p = m.group(1).upper()
+    if p in prefix_api_map:
+        return prefix_api_map[p]
+    if p[:3] in prefix_api_map:
+        return prefix_api_map[p[:3]]
+    return None
+
+def select_primary_initial_sdk(api_counts):
+    """
+    Given a Counter({api_level: build_count}), filter out brief pre-release factory
+    stopgaps (e.g. caiman shipping with 2 AD1A Android 14 builds in Aug-Sep 2024
+    right before its full Android 15 generation cycle).
+    """
+    if not api_counts:
+        return None
+    sorted_apis = sorted(api_counts.keys())
+    if len(sorted_apis) >= 2:
+        first_api, second_api = sorted_apis[0], sorted_apis[1]
+        # If the earliest API only had 1-2 stopgap builds while the next API had a full cycle (>= 3)
+        if api_counts[first_api] < 3 and api_counts[second_api] >= 3:
+            return second_api
+    return sorted_apis[0]
+
+def find_initial_sdk(device_name, codename, flash_key):
     load_reference_pages()
     clean_code = codename.lower().replace("_beta", "").strip()
     target_norm = re.sub(r'\s+', ' ', device_name.lower().replace('google', '')).strip()
     api_map = _ref_cache["api_map"]
     table_html = _ref_cache["table_html"]
     img_html = _ref_cache["img_html"]
-    candidates = []
 
-    # 1. Check Source Code Tags and Builds table
+    # 1. Check official Factory Images page scoped strictly to this codename's build rows
+    if img_html:
+        pattern = rf'<tr\s+id="{re.escape(clean_code)}(?:[a-z0-9]+\.\d+)[^"]*"[^>]*>\s*<td>([^<]+)</td>'
+        ver_matches = re.findall(pattern, img_html, re.I)
+        if ver_matches:
+            img_counts = Counter()
+            for v_str in ver_matches:
+                api = version_str_to_api(v_str, api_map)
+                if api:
+                    img_counts[api] += 1
+            sdk = select_primary_initial_sdk(img_counts)
+            if sdk:
+                return sdk
+
+    # 2. Check Android Flash Station (_beta track first, then production) via dynamic build ID decoding
+    if flash_key:
+        for query_prod in (f"{clean_code}_beta", clean_code):
+            try:
+                station_req = urllib.request.Request(
+                    f"https://content-flashstation-pa.googleapis.com/v1/builds?product={query_prod}&key={flash_key}",
+                    headers={'Referer': 'https://flash.android.com/'}
+                )
+                data = json.loads(urllib.request.urlopen(station_req, timeout=10).read().decode('utf-8'))
+                builds = data.get("flashstationBuild", [])
+                fs_counts = Counter()
+                for b in builds:
+                    rc_name = str(b.get("releaseCandidateName", ""))
+                    api = build_id_to_api(rc_name)
+                    if api and api >= 21:
+                        fs_counts[api] += 1
+                if fs_counts:
+                    return min(fs_counts.keys()) if query_prod.endswith("_beta") else select_primary_initial_sdk(fs_counts)
+            except Exception as e:
+                print(f"Warning: Failed to fetch flash station builds for {query_prod}: {e}", file=sys.stderr)
+
+    # 3. Fallback to Source Code Tags and Builds table
     if table_html:
+        tag_counts = Counter()
         for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.I):
             cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)]
             if len(cols) >= 4:
@@ -168,49 +265,12 @@ def find_initial_sdk(device_name, codename, flash_key, fallback_sdk=None):
                 for dev in dev_col.split(','):
                     dev_norm = re.sub(r'\s+', ' ', dev.lower().replace('google', '')).strip()
                     if dev_norm == target_norm:
-                        candidates.append(api)
+                        tag_counts[api] += 1
+        sdk = select_primary_initial_sdk(tag_counts)
+        if sdk:
+            return sdk
 
-    # 2. Check official Factory Images page by exact codename (first entry = launch build)
-    if img_html:
-        pattern = rf'<tr\s+id="{re.escape(clean_code)}[^"]*"[^>]*>\s*<td>([^<]+)</td>'
-        ver_matches = re.findall(pattern, img_html, re.I)
-        if ver_matches:
-            launch_api = version_str_to_api(ver_matches[0], api_map)
-            if launch_api:
-                candidates.append(launch_api)
-
-    # 3. Check Android Flash Station production builds API level
-    if flash_key:
-        try:
-            station_req = urllib.request.Request(
-                f"https://content-flashstation-pa.googleapis.com/v1/builds?product={clean_code}&key={flash_key}",
-                headers={'Referer': 'https://flash.android.com/'}
-            )
-            data = json.loads(urllib.request.urlopen(station_req, timeout=10).read().decode('utf-8'))
-            builds = data.get("flashstationBuild", [])
-            apis = []
-            for b in builds:
-                for k in ("apiLevel", "releaseTrackVersion"):
-                    val = b.get(k)
-                    if isinstance(val, int) and val >= 21:
-                        apis.append(val)
-                    elif isinstance(val, str) and val.isdigit() and int(val) >= 21:
-                        apis.append(int(val))
-            if apis:
-                candidates.append(min(apis))
-        except Exception as e:
-            print(f"Warning: Failed to fetch flash station builds for {clean_code}: {e}", file=sys.stderr)
-
-    if candidates:
-        return min(candidates)
-
-    if fallback_sdk:
-        try:
-            return int(fallback_sdk)
-        except (ValueError, TypeError):
-            pass
-
-    return 33
+    return None
 
 devices = {}
 for m in re.finditer(r'<tr\s+id="([^"]+)"[^>]*>\s*<td>([^<]+)</td>', factory_html, re.I):
@@ -243,8 +303,8 @@ for cand_name in candidate_names:
     cand_product = devices[cand_name]
     cand_device = cand_product.replace("_beta", "")
     print(f"Checking initial SDK for {cand_name} ({cand_device})...")
-    sdk = find_initial_sdk(cand_name, cand_device, flash_key, existing_meta.get("VERSION.DEVICE_INITIAL_SDK_INT"))
-    if sdk >= MIN_INITIAL_SDK:
+    sdk = find_initial_sdk(cand_name, cand_device, flash_key)
+    if sdk is not None and sdk >= MIN_INITIAL_SDK:
         device_name = cand_name
         product = cand_product
         device = cand_device
