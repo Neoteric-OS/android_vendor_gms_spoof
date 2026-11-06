@@ -28,9 +28,6 @@ def get_html(url, timeout=15, extra_headers=None):
 
 out_file = "gms_certified_props.json"
 
-# Hardcoded security patch level
-SECURITY_PATCH = "2026-10-05"
-
 # Minimum required DEVICE_INITIAL_SDK_INT (API 32 = Android 12L)
 MIN_INITIAL_SDK = 32
 
@@ -105,6 +102,7 @@ _ref_cache = {
     "loaded": False,
     "api_map": {},
     "prefix_api_map": {},
+    "build_patch_map": {},
     "table_html": "",
     "img_html": ""
 }
@@ -115,6 +113,7 @@ def load_reference_pages():
     _ref_cache["loaded"] = True
     api_map = _ref_cache["api_map"]
     prefix_api_map = _ref_cache["prefix_api_map"]
+    build_patch_map = _ref_cache["build_patch_map"]
 
     try:
         req = urllib.request.Request(
@@ -145,17 +144,24 @@ def load_reference_pages():
             table_html = table_html[:end_pos]
         _ref_cache["table_html"] = table_html
 
-        # Learn build ID prefixes from source-code-tags-and-builds
+        # Learn build ID prefixes and exact security patch mappings from source-code-tags-and-builds
         for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.I):
             cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)]
             if len(cols) >= 3:
                 build_id, tag_str, ver_str = cols[0], cols[1], cols[2]
                 api = version_str_to_api(ver_str, api_map) or version_str_to_api(tag_str, api_map)
-                m_bid = re.match(r'^([A-Z0-9]{3,4})\.\d{6}', build_id, re.I)
+                m_bid = re.match(r'^([A-Z0-9]{3,4})\.(\d{6})', build_id, re.I)
                 if api and m_bid:
                     p = m_bid.group(1).upper()
                     prefix_api_map[p] = api
                     prefix_api_map[p[:3]] = api
+
+                # Extract security patch date (YYYY-MM-DD) if present in the row
+                m_patch = re.search(r'(\d{4}-\d{2}-\d{2})', " ".join(cols))
+                if m_patch and m_bid:
+                    patch_date = m_patch.group(1)
+                    build_patch_map[build_id.upper()] = patch_date
+                    build_patch_map[f"{m_bid.group(1).upper()}.{m_bid.group(2)}"] = patch_date
     except Exception as e:
         print(f"Warning: Failed to fetch/parse source.android.com: {e}", file=sys.stderr)
 
@@ -192,6 +198,43 @@ def build_id_to_api(build_id):
     if p[:3] in prefix_api_map:
         return prefix_api_map[p[:3]]
     return None
+
+def resolve_security_patch(build_id):
+    """
+    Resolve VERSION.SECURITY_PATCH (YYYY-MM-05) from a build ID.
+    1. Checks exact build ID match from source.android.com build-numbers table.
+    2. Parses YYMMDD from the build ID:
+       - If DD <= 10 (standard monthly release stamp, e.g. CP2A.260605.016), patch is YYYY-MM-05.
+       - If DD > 10 (Canary/Beta mid-to-late month branch cutoff, e.g. ZP11.260918.007 -> 2026-10-05,
+         ZP11.261016.008 -> 2026-11-05), patch rolls forward to the next month's 05.
+    """
+    load_reference_pages()
+    bid_clean = build_id.strip().upper()
+    build_patch_map = _ref_cache["build_patch_map"]
+
+    if bid_clean in build_patch_map:
+        return build_patch_map[bid_clean]
+
+    m = re.search(r'(?:^|\b)([A-Z0-9]{3,4})\.(\d{2})(\d{2})(\d{2})\.\d+', bid_clean)
+    if m:
+        prefix, yy, mm, dd = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+        short_key = f"{prefix}.{yy:02d}{mm:02d}{dd:02d}"
+        if short_key in build_patch_map:
+            return build_patch_map[short_key]
+
+        year = 2000 + yy
+        month = mm
+        if 1 <= month <= 12:
+            # Canary & Beta builds stamped after the 10th ship with the upcoming month's security patch
+            if dd > 10:
+                if month == 12:
+                    year += 1
+                    month = 1
+                else:
+                    month += 1
+            return f"{year:04d}-{month:02d}-05"
+
+    return existing_meta.get("VERSION.SECURITY_PATCH", "")
 
 def select_primary_initial_sdk(api_counts):
     """
@@ -360,6 +403,13 @@ if not build_id or not build_inc:
     print("Could not parse build id/incremental from flash station response.")
     sys.exit(1)
 
+security_patch = resolve_security_patch(build_id)
+if not security_patch:
+    print(f"Could not resolve security patch for build ID: {build_id}")
+    sys.exit(1)
+
+print(f"Resolved build {build_id} ({build_inc}) -> security patch {security_patch}")
+
 # Fingerprint keeps the literal "CANARY"; ro.build.version.release is numeric.
 RELEASE = latest_version
 fingerprint = f"google/{product}/{device}:CANARY/{build_id}/{build_inc}:user/release-keys"
@@ -373,7 +423,7 @@ existing_meta["DEVICE"] = device
 existing_meta["ID"] = build_id
 existing_meta["VERSION.INCREMENTAL"] = build_inc
 existing_meta["VERSION.RELEASE"] = RELEASE
-existing_meta["VERSION.SECURITY_PATCH"] = SECURITY_PATCH
+existing_meta["VERSION.SECURITY_PATCH"] = security_patch
 existing_meta["VERSION.DEVICE_INITIAL_SDK_INT"] = str(initial_sdk)
 existing_meta["TYPE"] = "user"
 existing_meta["TAGS"] = "release-keys"
