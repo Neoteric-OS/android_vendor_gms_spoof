@@ -1,15 +1,15 @@
 {
     "MANUFACTURER": "Google",
-    "MODEL": "Pixel 10 Pro",
-    "FINGERPRINT": "google/blazer_beta/blazer:CANARY/ZP11.261016.008/16754936:user/release-keys",
+    "MODEL": "Pixel Tablet",
+    "FINGERPRINT": "google/tangorpro_beta/tangorpro:CANARY/ZP11.261016.008/16754936:user/release-keys",
     "BRAND": "google",
-    "PRODUCT": "blazer_beta",
-    "DEVICE": "blazer",
+    "PRODUCT": "tangorpro_beta",
+    "DEVICE": "tangorpro",
     "ID": "ZP11.261016.008",
     "VERSION.INCREMENTAL": "16754936",
     "VERSION.RELEASE": "17",
     "VERSION.SECURITY_PATCH": "2026-11-05",
-    "VERSION.DEVICE_INITIAL_SDK_INT": "36",
+    "VERSION.DEVICE_INITIAL_SDK_INT": "33",
     "TYPE": "user",
     "TAGS": "release-keys"
 }
